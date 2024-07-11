@@ -23,6 +23,11 @@ export interface MessageModel {
     timestamp?: string;
 }
 
+export interface conversationModel {
+    id: string;
+    vectorClock: Map<string, number>;
+}
+
 const messageQueue: MessageModel[] = [];
 const messageHistory: MessageModel[] = [];
 
@@ -56,7 +61,7 @@ function broadcastMessage(content: string, type: "broadcast" | "rebroadcast" | "
     };
 
     const payload = JSON.stringify(message);
-    neighbors.forEach((address, id) => {
+    neighbors.forEach((address) => {
         server.send(payload, Number.parseInt(address.split(":")[1]), address.split(":")[0], (err) => {
             if (err) {
                 console.log(err);
@@ -120,6 +125,12 @@ function deliverMessages() {
             messageQueue.shift();
             continue;
         }
+        if (message.type == "direct") {
+            console.log(`${message.origin}: ${message.content}`);
+            messageQueue.shift();
+            messageHistory.push(message);
+            continue;
+        }
         if (canDeliverCausally(message)) {
             // @ts-ignore
             vectorClock.set(message.origin, vectorClock.get(message.origin) + 1);
@@ -129,16 +140,29 @@ function deliverMessages() {
         } else {
             break;
         }
+
     }
 }
 
-function quit() {
-    const quitMessage: MessageModel = {
-        type: "quit",
-        content: "",
-        origin: nodeId
+function directMsg(content: string, address: string, port: string) {
+
+
+    const message : MessageModel = {
+        type: "direct",
+        content: content,
+        origin: nodeId,
     };
 
+    const payload = JSON.stringify(message);
+    server.send(payload, Number.parseInt(port), address, (err) => {
+        if (err) {
+            console.log(err);
+            process.exit(1);
+        }
+    });
+}
+
+function quit() {
     broadcastMessage("", "quit");
     server.close();
 }
@@ -148,7 +172,7 @@ server.on('message', (msg, info) => {
     const message = JSON.parse(msg.toString());
     if (validatePayload(msg.toString())) {
         if (message.type == "meet") {
-            if (!neighbors.has(message.origin) && message.origin != nodeId){
+            if (!neighbors.has(message.origin) && message.origin != nodeId) {
                 groupMeet(info.address, info.port.toString());
                 neighbors.set(message.origin, `${info.address}:${info.port}`);
                 vectorClock.set(message.origin, 0);
@@ -165,6 +189,12 @@ server.on('message', (msg, info) => {
         } else if (message.type == "quit") {
             neighbors.delete(message.origin);
             console.log(`%cNeighbor left: ${message.origin}`, "color: red");
+        } else if (message.type == "direct") {
+            if (message.origin != nodeId) {
+                messageQueue.push(message);
+                deliverMessages();
+            }
+
         }
     }
 });
@@ -183,29 +213,25 @@ rl.on("line", async (text) => {
     const [command, ...args] = text.split(" ");
     if (command === "meet") {
         groupMeet(args[0], args[1]);
-        // } else if (command === "dm") {
-        //     const choices = [...neighbors.keys()].map((neighbor) => ({
-        //         title: neighbor,
-        //         value: neighbors.get(neighbor),
-        //     }));
-        //
-        //     console.log("Here are your neighbors:");
-        //
-        //     choices.forEach((choice) => console.log("%s, %s", choice.title, choice.value));
-        //
-        //     rl.question("Who do you want to send a message to? (addr:port)", (response) => {
-        //         const [address, port] = response.split(":");
-        //
-        //         rl.question("Type your message: ", (msg) => {
-        //             directMsg({
-        //                 type: "direct",
-        //                 payload: msg,
-        //                 origin: `${server.address().address}:${server.address().port}`
-        //             }, address, port);
-        //             clearLastLine();
-        //             console.log("You sent: %s", msg);
-        //         });
-        //     });
+    } else if (command === "dm") {
+        const choices = [...neighbors.keys()].map((neighbor) => ({
+            title: neighbor,
+            value: neighbors.get(neighbor),
+        }));
+
+        console.log("Here are your neighbors:");
+
+        choices.forEach((choice) => console.log("%s, %s", choice.title, choice.value));
+
+        rl.question("Who do you want to send a message to? (addr:port)", (response) => {
+            const [address, port] = response.split(":");
+
+            rl.question("Type your message: ", (msg) => {127.
+                directMsg(msg, address, port);
+                clearLastLine();
+                console.log("You sent: %s", msg);
+            });
+        });
     } else if (command === "broadcast") {
         rl.question("Type your message: ", (msg) => {
             broadcastMessage(msg);
