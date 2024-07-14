@@ -23,11 +23,6 @@ export interface MessageModel {
     timestamp?: string;
 }
 
-export interface conversationModel {
-    id: string;
-    vectorClock: Map<string, number>;
-}
-
 const messageQueue: MessageModel[] = [];
 const messageHistory: MessageModel[] = [];
 
@@ -39,6 +34,8 @@ const neighbors = new Map<string, string>();
 const vectorClock = new Map<string, number>();
 vectorClock.set(nodeId, 0);
 
+const dmSentSequenceNumbers = new Map<string, number>();
+const dmExpectedSequenceNumbers = new Map<string, number>();
 
 function validatePayload(payload: string) {
     return messageSchema.safeParse(JSON.parse(payload)).success;
@@ -118,6 +115,30 @@ function canDeliverCausally(message: MessageModel) {
     }
 }
 
+function canDeliverOrderly(message: MessageModel) {
+
+    if (dmExpectedSequenceNumbers.has(message.origin)) {
+        // @ts-ignore
+        if (message.timestamp == dmExpectedSequenceNumbers.get(message.origin).toString()) {
+            // @ts-ignore
+            dmExpectedSequenceNumbers.set(message.origin, dmExpectedSequenceNumbers.get(message.origin) + 1);
+            return true;
+        } else {
+            return false;
+        }
+    } else {
+        dmExpectedSequenceNumbers.set(message.origin, 0);
+        if (message.timestamp == "0") {
+            // @ts-ignore
+            dmExpectedSequenceNumbers.set(message.origin, 1);
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+}
+
 function deliverMessages() {
     while (messageQueue.length > 0) {
         const message = messageQueue[0];
@@ -126,15 +147,17 @@ function deliverMessages() {
             continue;
         }
         if (message.type == "direct") {
-            console.log(`${message.origin}: ${message.content}`);
-            messageQueue.shift();
-            messageHistory.push(message);
-            continue;
+            if (canDeliverOrderly(message)) {
+                console.log(`Direct Message > ${message.origin}: ${message.content}`);
+                messageQueue.shift();
+                messageHistory.push(message);
+                continue;
+            }
         }
         if (canDeliverCausally(message)) {
             // @ts-ignore
             vectorClock.set(message.origin, vectorClock.get(message.origin) + 1);
-            console.log(`${message.origin}: ${message.content}`);
+            console.log(`Broadcast > ${message.origin}: ${message.content}`);
             messageQueue.shift();
             messageHistory.push(message);
         } else {
@@ -145,12 +168,37 @@ function deliverMessages() {
 }
 
 function directMsg(content: string, address: string, port: string) {
+    if (!addressSchema.safeParse(address).success) {
+        console.log("%cInvalid address", "color: red");
+        return;
+    }
 
+    if (!portSchema.safeParse(port).success) {
+        console.log("%cInvalid port", "color: red");
+        return;
+    }
 
-    const message : MessageModel = {
+    const neighbor = [...neighbors.keys()].find((key) => neighbors.get(key) == `${address}:${port}`);
+
+    if (neighbor && !dmExpectedSequenceNumbers.has(neighbor)) {
+        dmExpectedSequenceNumbers.set(neighbor, 0);
+    }
+
+    if (neighbor && !dmSentSequenceNumbers.has(neighbor)) {
+        dmSentSequenceNumbers.set(neighbor, 0);
+    } else if (neighbor) {
+        // @ts-ignore
+        dmSentSequenceNumbers.set(neighbor, dmSentSequenceNumbers.get(neighbor) + 1);
+    }
+
+    // @ts-ignore
+    const timestamp = dmSentSequenceNumbers.get(neighbor).toString();
+
+    const message: MessageModel = {
         type: "direct",
         content: content,
         origin: nodeId,
+        timestamp: timestamp
     };
 
     const payload = JSON.stringify(message);
@@ -170,32 +218,33 @@ function quit() {
 
 server.on('message', (msg, info) => {
     const message = JSON.parse(msg.toString());
-    if (validatePayload(msg.toString())) {
-        if (message.type == "meet") {
-            if (!neighbors.has(message.origin) && message.origin != nodeId) {
-                groupMeet(info.address, info.port.toString());
-                neighbors.set(message.origin, `${info.address}:${info.port}`);
-                vectorClock.set(message.origin, 0);
-                console.log(`%cNew neighbor: ${message.origin}`, "color: green");
-            }
-        } else if (message.type == "broadcast" || message.type == "rebroadcast") {
-            if (message.origin != nodeId) {
-                messageQueue.push(message);
-                deliverMessages();
-                if (message.type == "broadcast") {
-                    broadcastMessage(message.content, "rebroadcast");
-                }
-            }
-        } else if (message.type == "quit") {
-            neighbors.delete(message.origin);
-            console.log(`%cNeighbor left: ${message.origin}`, "color: red");
-        } else if (message.type == "direct") {
-            if (message.origin != nodeId) {
-                messageQueue.push(message);
-                deliverMessages();
-            }
+    if (!validatePayload(msg.toString())) {
+        return;
+    }
 
+    if (message.origin == nodeId) {
+        return;
+    }
+
+    if (message.type == "meet") {
+        if (!neighbors.has(message.origin)) {
+            groupMeet(info.address, info.port.toString());
+            neighbors.set(message.origin, `${info.address}:${info.port}`);
+            vectorClock.set(message.origin, 0);
+            console.log(`%cNew neighbor: ${message.origin}`, "color: green");
         }
+    } else if (message.type == "broadcast" || message.type == "rebroadcast") {
+        messageQueue.push(message);
+        deliverMessages();
+        if (message.type == "broadcast") {
+            broadcastMessage(message.content, "rebroadcast");
+        }
+    } else if (message.type == "quit") {
+        neighbors.delete(message.origin);
+        console.log(`%cNeighbor left: ${message.origin}`, "color: red");
+    } else if (message.type == "direct") {
+        messageQueue.push(message);
+        deliverMessages();
     }
 });
 
@@ -226,7 +275,7 @@ rl.on("line", async (text) => {
         rl.question("Who do you want to send a message to? (addr:port)", (response) => {
             const [address, port] = response.split(":");
 
-            rl.question("Type your message: ", (msg) => {127.
+            rl.question("Type your message: ", (msg) => {
                 directMsg(msg, address, port);
                 clearLastLine();
                 console.log("You sent: %s", msg);
